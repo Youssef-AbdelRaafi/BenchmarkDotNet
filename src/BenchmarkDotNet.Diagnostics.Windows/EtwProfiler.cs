@@ -1,0 +1,167 @@
+using BenchmarkDotNet.Analysers;
+using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.Diagnostics.Windows.Tracing;
+using BenchmarkDotNet.Engines;
+using BenchmarkDotNet.Exporters;
+using BenchmarkDotNet.Extensions;
+using BenchmarkDotNet.Loggers;
+using BenchmarkDotNet.Reports;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Validators;
+using JetBrains.Annotations;
+using Microsoft.Diagnostics.Tracing.Session;
+using System.Collections.Immutable;
+
+namespace BenchmarkDotNet.Diagnostics.Windows
+{
+    public class EtwProfiler : IDiagnoser, IHardwareCountersDiagnoser, IProfiler
+    {
+        private readonly EtwProfilerConfig config;
+        private readonly RunMode runMode;
+        private readonly Dictionary<BenchmarkCase, string> benchmarkToEtlFile;
+        private readonly Dictionary<BenchmarkCase, PreciseMachineCounter[]> benchmarkToCounters;
+
+        private Session kernelSession = default!;
+        private Session userSession = default!;
+        private Session heapSession = default!;
+
+        [PublicAPI] // parameterless ctor required by DiagnosersLoader to support creating this profiler via console line args
+        public EtwProfiler() : this(new EtwProfilerConfig(performExtraBenchmarksRun: false)) { }
+
+        [PublicAPI]
+        public EtwProfiler(EtwProfilerConfig config)
+        {
+            this.config = config;
+            runMode = config.PerformExtraBenchmarksRun ? RunMode.ExtraRun : RunMode.NoOverhead;
+            benchmarkToEtlFile = [];
+            benchmarkToCounters = [];
+            CreationTime = DateTime.Now;
+        }
+
+        public string ShortName => "ETW";
+
+        public IEnumerable<string> Ids => [nameof(EtwProfiler)];
+
+        public IEnumerable<IExporter> Exporters => [];
+
+        public IEnumerable<IAnalyser> Analysers => [];
+
+        public IReadOnlyDictionary<BenchmarkCase, PmcStats> Results => BuildPmcStats();
+
+        internal IReadOnlyDictionary<BenchmarkCase, string> BenchmarkToEtlFile => benchmarkToEtlFile;
+
+        private DateTime CreationTime { get; }
+
+        public RunMode GetRunMode(BenchmarkCase benchmarkCase) => runMode;
+
+        // Iterated here rather than through BenchmarkDotNet's ToAsyncEnumerable polyfill: that one is internal to
+        // BenchmarkDotNet and compiled out of its .NET 10 asset, while this assembly is netstandard2.0 and would
+        // bind the netstandard asset's copy - which a .NET 10 host then cannot load.
+        public async IAsyncEnumerable<ValidationError> ValidateAsync(ValidationParameters validationParameters)
+        {
+            foreach (var error in HardwareCounters.Validate(validationParameters, mandatory: false))
+            {
+                yield return error;
+            }
+        }
+
+        public ValueTask HandleAsync(HostSignal signal, DiagnoserActionParameters parameters, CancellationToken cancellationToken)
+        {
+            // it's crucial to start the trace before the process starts and stop it after the benchmarked process stops to have all of the necessary events in the trace file!
+            if (signal == HostSignal.BeforeProcessStart)
+                Start(parameters);
+            else if (signal == HostSignal.AfterProcessExit)
+                Stop(parameters);
+            return new();
+        }
+
+        public IEnumerable<Metric> ProcessResults(DiagnoserResults results)
+        {
+            if (!benchmarkToEtlFile.TryGetValue(results.BenchmarkCase, out var traceFilePath))
+                return [];
+
+            // currently TraceLogParser parsers the counters metrics only. So if there are no counters configured, it makes no sense to parse the file
+            if (!benchmarkToCounters.TryGetValue(results.BenchmarkCase, out var counters) || counters.IsEmpty())
+                return [];
+
+            return TraceLogParser.Parse(traceFilePath, counters);
+        }
+
+        public void DisplayResults(ILogger logger)
+        {
+            if (!benchmarkToEtlFile.Any())
+                return;
+
+            logger.WriteLineInfo($"Exported {benchmarkToEtlFile.Count} trace file(s). Example:");
+            logger.WriteLineInfo(benchmarkToEtlFile.Values.First());
+        }
+
+        private void Start(DiagnoserActionParameters parameters)
+        {
+            var counters = benchmarkToCounters[parameters.BenchmarkCase] = parameters.Config
+                .GetHardwareCounters()
+                .Select(counter => HardwareCounters.FromCounter(counter, config.IntervalSelectors.TryGetValue(counter, out var selector) ? selector : GetInterval))
+                .ToArray();
+
+            if (counters.Any()) // we need to enable the counters before starting the kernel session
+                HardwareCounters.Enable(counters);
+
+            try
+            {
+                kernelSession = new KernelSession(parameters, config, CreationTime).EnableProviders();
+                if (config.CreateHeapSession)
+                    heapSession = new HeapSession(parameters, config, CreationTime).EnableProviders();
+                userSession = new UserSession(parameters, config, CreationTime).EnableProviders();
+            }
+            catch (Exception)
+            {
+                userSession?.Dispose();
+                heapSession?.Dispose();
+                kernelSession?.Dispose();
+
+                throw;
+            }
+        }
+
+        private void Stop(DiagnoserActionParameters parameters)
+        {
+            WaitForDelayedEvents();
+            string userSessionFile = userSession.FilePath;
+            kernelSession.Dispose();
+            heapSession?.Dispose();
+            userSession.Dispose();
+
+            // Merge the 'primary' etl file X.etl (userSession) with any files that match .clr*.etl .user*.etl. and .kernel.etl.
+            TraceEventSession.MergeInPlace(userSessionFile, TextWriter.Null);
+
+            benchmarkToEtlFile[parameters.BenchmarkCase] = userSessionFile;
+        }
+
+        private static int GetInterval(ProfileSourceInfo info) => Math.Min(info.MaxInterval, Math.Max(info.MinInterval, info.Interval));
+
+        /// <summary>
+        /// ETW sessions receive events with a slight delay.
+        /// This increases the likelihood that all relevant events are processed by the collection thread by the time we are done with the benchmark.
+        /// </summary>
+        private static void WaitForDelayedEvents() => Thread.Sleep(TimeSpan.FromMilliseconds(500));
+
+        private IReadOnlyDictionary<BenchmarkCase, PmcStats> BuildPmcStats()
+        {
+            var builder = ImmutableDictionary.CreateBuilder<BenchmarkCase, PmcStats>();
+
+            foreach (var benchmarkToCounter in benchmarkToCounters)
+            {
+                var uniqueCounters = benchmarkToCounter.Value.Select(x => x.Counter).Distinct().ToImmutableArray();
+
+                var pmcStats = new PmcStats(
+                    uniqueCounters,
+                    counter => benchmarkToCounter.Value.Single(pmc => pmc.Counter == counter)
+                );
+
+                builder.Add(benchmarkToCounter.Key, pmcStats);
+            }
+
+            return builder.ToImmutable();
+        }
+    }
+}

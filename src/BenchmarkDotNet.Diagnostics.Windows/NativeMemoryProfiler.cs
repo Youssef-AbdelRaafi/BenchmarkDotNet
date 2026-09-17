@@ -1,0 +1,71 @@
+using BenchmarkDotNet.Analysers;
+using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.Diagnostics.Windows.Tracing;
+using BenchmarkDotNet.Engines;
+using BenchmarkDotNet.Exporters;
+using BenchmarkDotNet.Loggers;
+using BenchmarkDotNet.Reports;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Validators;
+using JetBrains.Annotations;
+using Microsoft.Diagnostics.Tracing.Parsers;
+
+namespace BenchmarkDotNet.Diagnostics.Windows
+{
+    public class NativeMemoryProfiler : IProfiler
+    {
+        private readonly LogCapture logger = new LogCapture();
+
+        private readonly EtwProfiler etwProfiler;
+
+        public string ShortName => "NativeMemory";
+
+        [PublicAPI] // parameterless ctor required by DiagnosersLoader to support creating this profiler via console line args
+        public NativeMemoryProfiler() => etwProfiler = new EtwProfiler(CreateDefaultConfig());
+
+        public IEnumerable<string> Ids => [nameof(NativeMemoryProfiler)];
+
+        public IEnumerable<IExporter> Exporters => [];
+
+        public IEnumerable<IAnalyser> Analysers => [];
+
+        public void DisplayResults(ILogger resultLogger)
+        {
+            if (etwProfiler.BenchmarkToEtlFile.Any())
+            {
+                resultLogger.WriteLineInfo($"Exported {etwProfiler.BenchmarkToEtlFile.Count} trace file(s). Example:");
+                resultLogger.WriteLineInfo(etwProfiler.BenchmarkToEtlFile.Values.First());
+            }
+
+            foreach (var line in logger.CapturedOutput)
+                resultLogger.Write(line.Kind, line.Text);
+        }
+
+        public ValueTask HandleAsync(HostSignal signal, DiagnoserActionParameters parameters, CancellationToken cancellationToken)
+            => etwProfiler.HandleAsync(signal, parameters, cancellationToken);
+
+        public RunMode GetRunMode(BenchmarkCase benchmarkCase) => etwProfiler.GetRunMode(benchmarkCase);
+
+        public IEnumerable<Metric> ProcessResults(DiagnoserResults results)
+        {
+            if (!etwProfiler.BenchmarkToEtlFile.TryGetValue(results.BenchmarkCase, out var traceFilePath))
+                return [];
+
+            return new NativeMemoryLogParser(traceFilePath, results.BenchmarkCase, logger, results.BuildResult.ArtifactsPaths.ProgramName).Parse();
+        }
+
+        public IAsyncEnumerable<ValidationError> ValidateAsync(ValidationParameters validationParameters) => etwProfiler.ValidateAsync(validationParameters);
+
+        private static EtwProfilerConfig CreateDefaultConfig()
+        {
+            // We add VirtualAlloc because we want to catch low level VirtualAlloc and VirtualFree calls.
+            // We should add also VAMap which means that we want to log mapping of files into memory.
+            var kernelKeywords = KernelTraceEventParser.Keywords.VirtualAlloc | KernelTraceEventParser.Keywords.VAMap;
+
+            return new EtwProfilerConfig(
+                performExtraBenchmarksRun: true,
+                kernelKeywords: kernelKeywords,
+                createHeapSession: true);
+        }
+    }
+}

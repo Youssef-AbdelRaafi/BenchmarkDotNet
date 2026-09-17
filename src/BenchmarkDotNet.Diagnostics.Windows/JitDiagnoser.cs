@@ -1,0 +1,49 @@
+using BenchmarkDotNet.Detectors;
+using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.Engines;
+using BenchmarkDotNet.Loggers;
+using BenchmarkDotNet.Reports;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Validators;
+using Microsoft.Diagnostics.Tracing.Parsers;
+
+namespace BenchmarkDotNet.Diagnostics.Windows
+{
+    public abstract class JitDiagnoser<TStats> : EtwDiagnoser<TStats>, IDiagnoser where TStats : new()
+    {
+        protected override ulong EventType => (ulong)ClrTraceEventParser.Keywords.JitTracing;
+
+        protected override string SessionNamePrefix => "JitTracing";
+
+        public override RunMode GetRunMode(BenchmarkCase benchmarkCase) => RunMode.NoOverhead;
+
+        public abstract IEnumerable<string> Ids { get; }
+
+        public ValueTask HandleAsync(HostSignal signal, DiagnoserActionParameters parameters, CancellationToken cancellationToken)
+        {
+            if (signal == HostSignal.BeforeAnythingElse)
+                Start(parameters);
+            else if (signal == HostSignal.AfterAll)
+                Stop();
+            return new();
+        }
+
+        public virtual IEnumerable<Metric> ProcessResults(DiagnoserResults results) => [];
+
+        public async IAsyncEnumerable<ValidationError> ValidateAsync(ValidationParameters validationParameters)
+        {
+            if (!OsDetector.IsWindows())
+            {
+                yield return new ValidationError(true, $"{GetType().Name} is supported only on Windows");
+            }
+        }
+
+        public void DisplayResults(ILogger outputLogger)
+        {
+            if (Logger.CapturedOutput.Count > 0)
+                outputLogger.WriteLineHeader(new string('-', 20));
+            foreach (var line in Logger.CapturedOutput)
+                outputLogger.Write(line.Kind, line.Text);
+        }
+    }
+}
