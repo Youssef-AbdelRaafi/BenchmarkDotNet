@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\..\build\common.props" />
+  <PropertyGroup>
+    <AssemblyTitle>BenchmarkDotNet.Samples</AssemblyTitle>
+    <TargetFrameworks>net10.0;net472</TargetFrameworks>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>BenchmarkDotNet.Samples</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <PackageId>BenchmarkDotNet.Samples</PackageId>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <!-- Disable entry point generation as this project has it's own entry point -->
+    <GenerateProgramFile>false</GenerateProgramFile>
+    <!-- Disable parallel tests between TargetFrameworks -->
+    <TestTfmsInParallel>false</TestTfmsInParallel>
+  </PropertyGroup>
+  <PropertyGroup>
+    <!-- Use 13.0.1< as baseline package for IntroNuGet -->
+    <NewtonsoftJsonVersion Condition="'$(NewtonsoftJsonVersion)' == ''">13.0.1</NewtonsoftJsonVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="[$(NewtonsoftJsonVersion)]" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
+    <!-- The Test SDK is required only for the VSTest Adapter to work -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BenchmarkDotNet.Diagnostics.dotTrace\BenchmarkDotNet.Diagnostics.dotTrace.csproj" />
+    <ProjectReference Include="..\..\src\BenchmarkDotNet.Diagnostics.dotMemory\BenchmarkDotNet.Diagnostics.dotMemory.csproj" />
+    <ProjectReference Include="..\..\src\BenchmarkDotNet\BenchmarkDotNet.csproj" />
+    <ProjectReference Include="..\..\src\BenchmarkDotNet.Diagnostics.Windows\BenchmarkDotNet.Diagnostics.Windows.csproj" />
+    <ProjectReference Include="..\..\src\BenchmarkDotNet.TestAdapter\BenchmarkDotNet.TestAdapter.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Enables analyzers for this project (this is required since ProjectReference is not transitive). -->
+    <ProjectReference Include="..\..\src\BenchmarkDotNet.Analyzers\BenchmarkDotNet.Analyzers.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+  </ItemGroup>
+
+  <Import Project="..\..\build\common.targets" />
+</Project>
