@@ -1,0 +1,99 @@
+using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Environments;
+using BenchmarkDotNet.Jobs;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Tests.XUnit;
+using BenchmarkDotNet.Toolchains.NetCoreApp;
+
+namespace BenchmarkDotNet.Tests.Running
+{
+    public class JobRuntimePropertiesComparerTests
+    {
+        [Fact]
+        public void SingleJobLeadsToNoGrouping()
+        {
+            var benchmarks1 = BenchmarkConverter.TypeToBenchmarks(typeof(Plain1));
+            var benchmarks2 = BenchmarkConverter.TypeToBenchmarks(typeof(Plain2));
+
+            var grouped = benchmarks1.BenchmarksCases.Union(benchmarks2.BenchmarksCases)
+                .GroupBy(benchmark => benchmark, new BenchmarkPartitioner.BenchmarkRuntimePropertiesComparer())
+                .ToArray();
+
+            Assert.Single(grouped); // we should have single exe!
+            Assert.Equal(benchmarks1.BenchmarksCases.Length + benchmarks2.BenchmarksCases.Length, grouped.Single().Count());
+        }
+
+        public class Plain1
+        {
+            [Benchmark] public void M1() { }
+            [Benchmark] public void M2() { }
+            [Benchmark] public void M3() { }
+        }
+
+        public class Plain2
+        {
+            [Benchmark] public void M1() { }
+            [Benchmark] public void M2() { }
+            [Benchmark] public void M3() { }
+        }
+
+        public class Plain3
+        {
+            [Benchmark] public void M1() { }
+            [Benchmark] public void M2() { }
+            [Benchmark] public void M3() { }
+        }
+
+        [Fact]
+        public void BenchmarksAreGroupedByJob()
+        {
+            var benchmarks = BenchmarkConverter.TypeToBenchmarks(typeof(AllRuntimes));
+
+            var grouped = benchmarks.BenchmarksCases
+                .GroupBy(benchmark => benchmark, new BenchmarkPartitioner.BenchmarkRuntimePropertiesComparer())
+                .ToArray();
+
+            Assert.Equal(3, grouped.Length); // Clr + Mono + Core
+
+            foreach (var grouping in grouped)
+                Assert.Equal(2, grouping.Count()); // M1 + M2
+        }
+
+        [SimpleJob(runtimeMoniker: RuntimeMoniker.Net472)]
+        [SimpleJob(runtimeMoniker: RuntimeMoniker.Mono)]
+        [SimpleJob(runtimeMoniker: RuntimeMoniker.Net50)]
+        public class AllRuntimes
+        {
+            [Benchmark] public void M1() { }
+            [Benchmark] public void M2() { }
+        }
+
+        [Fact]
+        public void CustomTargetPlatformJobsAreGroupedByTargetFrameworkMoniker()
+        {
+            var net5Config = ManualConfig.Create(DefaultConfig.Instance)
+                .AddJob(Job.Default.WithToolchain(CsProjCoreToolchain.NetCoreApp50));
+            var net5WindowsConfig1 = ManualConfig.Create(DefaultConfig.Instance)
+                .AddJob(Job.Default.WithToolchain(CsProjCoreToolchain.From(CoreRuntime.Core50, new NetCoreAppSettings { TargetFrameworkMoniker = "net5.0-windows" })));
+            // a different INSTANCE of CsProjCoreToolchain that also targets "net5.0-windows"
+            var net5WindowsConfig2 = ManualConfig.Create(DefaultConfig.Instance)
+                .AddJob(Job.Default.WithToolchain(CsProjCoreToolchain.From(CoreRuntime.Core50, new NetCoreAppSettings { TargetFrameworkMoniker = "net5.0-windows" })));
+
+            var benchmarksNet5 = BenchmarkConverter.TypeToBenchmarks(typeof(Plain1), net5Config);
+            var benchmarksNet5Windows1 = BenchmarkConverter.TypeToBenchmarks(typeof(Plain2), net5WindowsConfig1);
+            var benchmarksNet5Windows2 = BenchmarkConverter.TypeToBenchmarks(typeof(Plain3), net5WindowsConfig2);
+
+            var grouped = benchmarksNet5.BenchmarksCases
+                .Union(benchmarksNet5Windows1.BenchmarksCases)
+                .Union(benchmarksNet5Windows2.BenchmarksCases)
+                .GroupBy(benchmark => benchmark, new BenchmarkPartitioner.BenchmarkRuntimePropertiesComparer())
+                .ToArray();
+
+            Assert.Equal(2, grouped.Length);
+
+            Assert.Single(grouped, group => group.Count() == 3); // Plain1 (3 methods) running against "net5.0"
+            Assert.Single(grouped, group => group.Count() == 6); // Plain2 (3 methods) and Plain3 (3 methods) running against "net5.0-windows"
+        }
+    }
+}
