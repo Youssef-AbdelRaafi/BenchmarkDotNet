@@ -1,0 +1,15 @@
+using JetBrains.Annotations;
+
+namespace BenchmarkDotNet.Attributes
+{
+    [AttributeUsage(AttributeTargets.Method | AttributeTargets.Class | AttributeTargets.Assembly, AllowMultiple = true)]
+    public class BenchmarkCategoryAttribute : Attribute
+    {
+        public string[] Categories { get; }
+
+        // CLS-Compliant Code requires a constructor without an array in the argument list
+        [PublicAPI] protected BenchmarkCategoryAttribute() => Categories = [];
+
+        public BenchmarkCategoryAttribute(params string[] categories) => Categories = categories;
+    }
+}
