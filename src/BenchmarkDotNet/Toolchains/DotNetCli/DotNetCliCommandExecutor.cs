@@ -1,0 +1,215 @@
+using BenchmarkDotNet.Detectors;
+using BenchmarkDotNet.Extensions;
+using BenchmarkDotNet.Helpers;
+using BenchmarkDotNet.Jobs;
+using BenchmarkDotNet.Loggers;
+using BenchmarkDotNet.Portability;
+using BenchmarkDotNet.Running;
+using JetBrains.Annotations;
+using System.Collections.Immutable;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace BenchmarkDotNet.Toolchains.DotNetCli
+{
+    [PublicAPI]
+    public static class DotNetCliCommandExecutor
+    {
+        internal static readonly Lazy<string> DefaultDotNetCliPath = new(GetDefaultDotNetCliPath);
+
+        [PublicAPI]
+        public static async Task<DotNetCliCommandResult> ExecuteAsync(DotNetCliCommand parameters, CancellationToken cancellationToken)
+        {
+            using var process = new Process { StartInfo = BuildStartInfo(parameters.CliPath, parameters.ArtifactsPaths.BuildArtifactsDirectoryPath, parameters.Arguments, parameters.EnvironmentVariables) };
+            using var outputReader = new AsyncProcessOutputReader(process,
+                stdOutLogger: parameters.LogOutput ? parameters.Logger : NullLogger.Instance,
+                stdErrLogger: parameters.Logger);
+
+            parameters.Logger.WriteLineInfo($"// start {process.StartInfo.FileName} {process.StartInfo.Arguments} in {process.StartInfo.WorkingDirectory}");
+
+            var stopwatch = Stopwatch.StartNew();
+            bool timedOut = false;
+            await using (new ProcessCleanupHelper(process, outputReader, parameters.Logger).ConfigureAwait(false))
+            {
+                process.Start();
+                outputReader.BeginRead();
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(parameters.Timeout);
+                try
+                {
+                    await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    parameters.Logger.WriteLineError($"// command took longer than the timeout: {parameters.Timeout.TotalSeconds:0.##}s. Killing the process tree!");
+                    timedOut = true;
+                }
+            }
+
+            stopwatch.Stop();
+
+            if (timedOut)
+                return DotNetCliCommandResult.Failure(stopwatch.Elapsed, $"The configured timeout {parameters.Timeout} was reached!" + outputReader.GetErrorText(), outputReader.GetOutputText());
+
+            parameters.Logger.WriteLineInfo($"// command took {stopwatch.Elapsed.TotalSeconds.ToInvariantString("0.##")} sec and exited with {process.ExitCode}");
+
+            if (process.ExitCode != 0)
+            {
+                return DotNetCliCommandResult.Failure(stopwatch.Elapsed, outputReader.GetOutputText(), outputReader.GetErrorText());
+            }
+
+            // A successful build's output is otherwise discarded (see DotNetCliCommandResult.ToBuildResult), so
+            // build/restore warnings (e.g. NU1701, NU1702) would be invisible unless LogBuildOutput is set. When the
+            // full output isn't already being streamed, surface just the warning lines so they aren't silently lost.
+            if (!parameters.LogOutput)
+                LogBuildWarnings(parameters.Logger, outputReader.GetOutputLines());
+
+            return DotNetCliCommandResult.Success(stopwatch.Elapsed, outputReader.GetOutputText());
+        }
+
+        // Matches an MSBuild/NuGet warning line, e.g. "...csproj : warning NU1702: ..." or "...targets(1,5): warning NETSDK1138: ...".
+        private static readonly Regex BuildWarningRegex = new(@": warning [A-Za-z]+\d+:", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+        // Surfaces just the warning lines from an otherwise-discarded successful build output, deduplicated
+        // (MSBuild repeats a warning per target framework and again in the summary).
+        private static void LogBuildWarnings(ILogger logger, ImmutableArray<string> outputLines)
+        {
+            HashSet<string>? seen = null;
+            foreach (var line in outputLines)
+            {
+                if (!BuildWarningRegex.IsMatch(line))
+                    continue;
+
+                string warning = line.Trim();
+                seen ??= new HashSet<string>(StringComparer.Ordinal);
+                if (seen.Add(warning))
+                    logger.WriteLineWarning($"// {warning}");
+            }
+        }
+
+        internal static string GetDotNetSdkVersion()
+        {
+            using var process = new Process { StartInfo = BuildStartInfo(customDotNetCliPath: null, workingDirectory: string.Empty, arguments: "--version", redirectStandardError: false) };
+            using var _ = new ProcessCleanupHelper(process, NullLogger.Instance);
+
+            try
+            {
+                process.Start();
+            }
+            catch (Win32Exception) // dotnet cli is not installed
+            {
+                return "";
+            }
+
+            string output = process.StandardOutput.ReadToEnd();
+
+            process.WaitForExit();
+
+            // first line contains something like ".NET Command Line Tools (1.0.0-beta-001603)"
+            return Regex.Split(output, Environment.NewLine, RegexOptions.Compiled)
+                .FirstOrDefault(line => line.IsNotBlank()) ?? "";
+        }
+
+        internal static void LogEnvVars(DotNetCliCommand command)
+        {
+            if (!command.LogOutput)
+            {
+                return;
+            }
+
+            ProcessStartInfo startInfo = BuildStartInfo(
+                command.CliPath, command.ArtifactsPaths.BuildArtifactsDirectoryPath, command.Arguments, command.EnvironmentVariables);
+
+            if (startInfo.Environment.Keys.Count > 0)
+            {
+                command.Logger.WriteLineInfo("// Environment Variables:");
+                foreach (var entry in startInfo.Environment.OrderBy(x=>x.Key))
+                {
+                    command.Logger.WriteLine($"\t[{entry.Key}] = \"{entry.Value}\"");
+                }
+            }
+        }
+
+        internal static ProcessStartInfo BuildStartInfo(FileInfo? customDotNetCliPath, string workingDirectory, string? arguments,
+            IReadOnlyList<EnvironmentVariable>? environmentVariables = null, bool redirectStandardInput = false, bool redirectStandardError = true, bool redirectStandardOutput = true)
+        {
+            const string dotnetMultiLevelLookupEnvVarName = "DOTNET_MULTILEVEL_LOOKUP";
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = customDotNetCliPath?.FullName ?? DefaultDotNetCliPath.Value,
+                WorkingDirectory = workingDirectory,
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = redirectStandardOutput,
+                RedirectStandardError = redirectStandardError,
+                RedirectStandardInput = redirectStandardInput,
+            };
+
+            if (redirectStandardOutput)
+            {
+                startInfo.StandardOutputEncoding = Encoding.UTF8;
+            }
+
+            if (redirectStandardError) // StandardErrorEncoding is only supported when standard error is redirected
+            {
+                startInfo.StandardErrorEncoding = Encoding.UTF8;
+            }
+
+            if (environmentVariables != null)
+                foreach (var environmentVariable in environmentVariables)
+                    startInfo.Environment[environmentVariable.Key] = environmentVariable.Value;
+
+            if (customDotNetCliPath is not null && (environmentVariables == null || environmentVariables.All(envVar => envVar.Key != dotnetMultiLevelLookupEnvVarName)))
+                startInfo.Environment[dotnetMultiLevelLookupEnvVarName] = "0";
+
+            return startInfo;
+        }
+
+        private static string GetDefaultDotNetCliPath()
+        {
+            if (!OsDetector.IsLinux())
+                return "dotnet";
+
+            using var parentProcess = Process.GetProcessById(libc.getppid());
+
+            string parentPath = parentProcess.MainModule?.FileName ?? string.Empty;
+            // sth like /snap/dotnet-sdk/112/dotnet and we should use the exact path instead of just "dotnet"
+            if (parentPath.StartsWith("/snap/", StringComparison.Ordinal) &&
+                parentPath.EndsWith("/dotnet", StringComparison.Ordinal))
+            {
+                return parentPath;
+            }
+
+            return "dotnet";
+        }
+
+        internal static async Task<string> GetSdkPathAsync(FileInfo? cliPath, CancellationToken cancellationToken)
+        {
+            DotNetCliCommand cliCommand = new(
+                cliPath: cliPath,
+                filePath: string.Empty,
+                tfm: string.Empty,
+                arguments: "--info",
+                artifactsPaths: ArtifactsPaths.Empty,
+                logger: NullLogger.Instance,
+                buildPartition: BuildPartition.Empty,
+                environmentVariables: [],
+                timeout: TimeSpan.FromMinutes(1),
+                logOutput: false);
+
+            string sdkPath = (await ExecuteAsync(cliCommand, cancellationToken).ConfigureAwait(false))
+                .StandardOutput.Split([Environment.NewLine], StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.EndsWith("/sdk]")) // sth like "  3.1.423 [/usr/share/dotnet/sdk]
+                .Select(line => line.Split('[')[1])
+                .Distinct()
+                .Single(); // I assume there will be only one such folder
+
+            return sdkPath[..^1]; // remove trailing `]`
+        }
+    }
+}

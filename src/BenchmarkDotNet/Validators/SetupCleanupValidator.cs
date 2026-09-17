@@ -1,0 +1,106 @@
+using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Extensions;
+using System.Reflection;
+
+namespace BenchmarkDotNet.Validators
+{
+    public class SetupCleanupValidator : IValidator
+    {
+        public static readonly SetupCleanupValidator FailOnError = new SetupCleanupValidator();
+
+        private SetupCleanupValidator() { }
+
+        public bool TreatsWarningsAsErrors => true; // it is a must!
+
+        public IAsyncEnumerable<ValidationError> ValidateAsync(ValidationParameters input)
+        {
+            var validationErrors = new List<ValidationError>();
+
+            foreach (var groupByType in input.Benchmarks.GroupBy(benchmark => benchmark.Descriptor.Type))
+            {
+                var allMethods = groupByType.Key.GetAllMethods().ToArray();
+
+                validationErrors.AddRange(ValidateAttributes<GlobalSetupAttribute>(groupByType.Key.Name, allMethods));
+                validationErrors.AddRange(ValidateAttributes<GlobalCleanupAttribute>(groupByType.Key.Name, allMethods));
+                validationErrors.AddRange(ValidateAttributes<IterationSetupAttribute>(groupByType.Key.Name, allMethods));
+                validationErrors.AddRange(ValidateAttributes<IterationCleanupAttribute>(groupByType.Key.Name, allMethods));
+
+                validationErrors.AddRange(ValidateReturnType<GlobalSetupAttribute>(groupByType.Key.Name, allMethods));
+                validationErrors.AddRange(ValidateReturnType<GlobalCleanupAttribute>(groupByType.Key.Name, allMethods));
+                validationErrors.AddRange(ValidateReturnType<IterationSetupAttribute>(groupByType.Key.Name, allMethods));
+                validationErrors.AddRange(ValidateReturnType<IterationCleanupAttribute>(groupByType.Key.Name, allMethods));
+            }
+
+            return validationErrors.ToAsyncEnumerable();
+        }
+
+        private IEnumerable<ValidationError> ValidateReturnType<T>(string benchmarkClassName, IEnumerable<MethodInfo> allMethods) where T : Attribute
+        {
+            foreach (var method in allMethods)
+            {
+                // The dual-shaped (awaitable AND async-enumerable) case is owned by
+                // AwaitableAsyncEnumerableAmbiguityValidator — skip it here so the same method does not
+                // produce two errors at once. The runtime awaits dual-shaped returns instead of rejecting
+                // them, which matches that validator's warning-not-error severity.
+                if (method.GetCustomAttributes(false).OfType<T>().Any()
+                    && method.ReturnType.IsAsyncEnumerable(out _)
+                    && !method.ReturnType.IsAwaitable(out _))
+                {
+                    yield return new ValidationError(
+                        TreatsWarningsAsErrors,
+                        $"[{typeof(T).Name}] method {benchmarkClassName}.{method.Name} returns an async enumerable, which is not supported.");
+                }
+            }
+        }
+
+        private IEnumerable<ValidationError> ValidateAttributes<T>(string benchmarkClassName, IEnumerable<MethodInfo> allMethods) where T : TargetedAttribute
+        {
+            int emptyTargetCount = 0;
+            var targetCount = new Dictionary<string, int>();
+
+            foreach (var method in allMethods)
+            {
+                var attributes = method.GetCustomAttributes(false).OfType<T>();
+
+                foreach (var attribute in attributes)
+                {
+                    if (attribute.Targets.IsNullOrEmpty())
+                    {
+                        emptyTargetCount++;
+                    }
+                    else
+                    {
+                        foreach (string target in attribute.Targets)
+                        {
+                            if (!targetCount.ContainsKey(target))
+                            {
+                                targetCount[target] = 1;
+                            }
+                            else
+                            {
+                                targetCount[target] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (emptyTargetCount > 1)
+            {
+                yield return new ValidationError(
+                    TreatsWarningsAsErrors,
+                    $"Only 1 [{typeof(T).Name}] in a class can have an empty target applied to it, class {benchmarkClassName} has {emptyTargetCount}");
+            }
+
+            foreach (var targetPair in targetCount)
+            {
+                if (targetPair.Value > 1)
+                {
+                    yield return new ValidationError(
+                        TreatsWarningsAsErrors,
+                        $"Only 1 [{typeof(T).Name}] in a class can \"Target = {targetPair.Key}\" applied to it, class {benchmarkClassName} has {targetPair.Value}");
+                }
+            }
+        }
+    }
+}

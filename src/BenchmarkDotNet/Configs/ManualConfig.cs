@@ -1,0 +1,307 @@
+using BenchmarkDotNet.Analysers;
+using BenchmarkDotNet.Columns;
+using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.EventProcessors;
+using BenchmarkDotNet.Exporters;
+using BenchmarkDotNet.Extensions;
+using BenchmarkDotNet.Filters;
+using BenchmarkDotNet.Jobs;
+using BenchmarkDotNet.Loggers;
+using BenchmarkDotNet.Order;
+using BenchmarkDotNet.Reports;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Validators;
+using JetBrains.Annotations;
+using System.Globalization;
+
+namespace BenchmarkDotNet.Configs
+{
+    public class ManualConfig : IConfig
+    {
+        private readonly static Conclusion[] emptyConclusion = [];
+
+        private readonly List<IColumnProvider> columnProviders = [];
+        private readonly List<IExporter> exporters = [];
+        private readonly List<ILogger> loggers = [];
+        private readonly List<IDiagnoser> diagnosers = [];
+        private readonly List<IAnalyser> analysers = [];
+        private readonly List<IValidator> validators = [];
+        private readonly List<Job> jobs = [];
+        private readonly HashSet<HardwareCounter> hardwareCounters = [];
+        private readonly List<IFilter> filters = [];
+        private readonly List<BenchmarkLogicalGroupRule> logicalGroupRules = [];
+        private readonly List<EventProcessor> eventProcessors = [];
+        private readonly List<IColumnHidingRule> columnHidingRules = [];
+
+        public IEnumerable<IColumnProvider> GetColumnProviders() => columnProviders;
+        public IEnumerable<IExporter> GetExporters() => exporters;
+        public IEnumerable<ILogger> GetLoggers() => loggers;
+        public IEnumerable<IDiagnoser> GetDiagnosers() => diagnosers;
+        public IEnumerable<IAnalyser> GetAnalysers() => analysers;
+        public IEnumerable<IValidator> GetValidators() => validators;
+        public IEnumerable<Job> GetJobs() => jobs;
+        public IEnumerable<HardwareCounter> GetHardwareCounters() => hardwareCounters;
+        public IEnumerable<IFilter> GetFilters() => filters;
+        public IEnumerable<BenchmarkLogicalGroupRule> GetLogicalGroupRules() => logicalGroupRules;
+        public IEnumerable<EventProcessor> GetEventProcessors() => eventProcessors;
+        public IEnumerable<IColumnHidingRule> GetColumnHidingRules() => columnHidingRules;
+
+        [PublicAPI] public ConfigOptions Options { get; set; }
+        [PublicAPI] public ConfigUnionRule UnionRule { get; set; } = ConfigUnionRule.Union;
+        [PublicAPI] public string? ArtifactsPath { get; set; }
+        [PublicAPI] public string? Title { get; set; }
+        [PublicAPI] public CultureInfo? CultureInfo { get; set; }
+        [PublicAPI] public IOrderer? Orderer { get; set; }
+        [PublicAPI] public ICategoryDiscoverer? CategoryDiscoverer { get; set; }
+        [PublicAPI] public SummaryStyle? SummaryStyle { get; set; }
+        [PublicAPI] public TimeSpan BuildTimeout { get; set; } = DefaultConfig.Instance.BuildTimeout;
+        [PublicAPI] public WakeLockType WakeLock { get; set; } = DefaultConfig.Instance.WakeLock;
+
+        public IReadOnlyList<Conclusion> ConfigAnalysisConclusion => emptyConclusion;
+
+        public ManualConfig WithOption(ConfigOptions option, bool value)
+        {
+            Options = Options.Set(value, option);
+            return this;
+        }
+
+        public ManualConfig WithOptions(ConfigOptions options)
+        {
+            Options |= options;
+            return this;
+        }
+
+        public ManualConfig WithUnionRule(ConfigUnionRule unionRule)
+        {
+            UnionRule = unionRule;
+            return this;
+        }
+
+        public ManualConfig WithArtifactsPath(string artifactsPath)
+        {
+            ArtifactsPath = artifactsPath;
+            return this;
+        }
+
+        public ManualConfig WithTitle(string title)
+        {
+            Title = title;
+            return this;
+        }
+
+        public ManualConfig WithSummaryStyle(SummaryStyle summaryStyle)
+        {
+            SummaryStyle = summaryStyle;
+            return this;
+        }
+
+        public ManualConfig WithOrderer(IOrderer orderer)
+        {
+            Orderer = orderer;
+            return this;
+        }
+
+        public ManualConfig WithCategoryDiscoverer(ICategoryDiscoverer categoryDiscoverer)
+        {
+            CategoryDiscoverer = categoryDiscoverer;
+            return this;
+        }
+
+        public ManualConfig WithBuildTimeout(TimeSpan buildTimeout)
+        {
+            BuildTimeout = buildTimeout;
+            return this;
+        }
+
+        public ManualConfig WithWakeLock(WakeLockType wakeLockType)
+        {
+            WakeLock = wakeLockType;
+            return this;
+        }
+
+        public ManualConfig AddColumn(params IColumn[] newColumns)
+        {
+            columnProviders.AddRangeDistinct(newColumns.Select(c => c.ToProvider()));
+            return this;
+        }
+
+        public ManualConfig AddColumnProvider(params IColumnProvider[] newColumnProviders)
+        {
+            columnProviders.AddRangeDistinct(newColumnProviders);
+            return this;
+        }
+
+        public ManualConfig AddExporter(params IExporter[] newExporters)
+        {
+            exporters.AddRangeDistinct(newExporters);
+            return this;
+        }
+
+        public ManualConfig AddLogger(params ILogger[] newLoggers)
+        {
+            loggers.AddRangeDistinct(newLoggers);
+            return this;
+        }
+
+        public ManualConfig AddDiagnoser(params IDiagnoser[] newDiagnosers)
+        {
+            diagnosers.AddRangeDistinct(newDiagnosers);
+            return this;
+        }
+
+        public ManualConfig AddAnalyser(params IAnalyser[] newAnalysers)
+        {
+            analysers.AddRangeDistinct(newAnalysers);
+            return this;
+        }
+
+        public ManualConfig AddValidator(params IValidator[] newValidators)
+        {
+            validators.AddRangeDistinct(newValidators);
+            return this;
+        }
+
+        public ManualConfig AddJob(params Job[] newJobs)
+        {
+            jobs.AddRangeDistinct(newJobs.Select(j => j.Freeze())); // DONTTOUCH: please DO NOT remove .Freeze() call.
+            return this;
+        }
+
+        public ManualConfig AddHardwareCounters(params HardwareCounter[] newHardwareCounters)
+        {
+            hardwareCounters.AddRange(newHardwareCounters);
+            return this;
+        }
+
+        public ManualConfig AddFilter(params IFilter[] newFilters)
+        {
+            filters.AddRangeDistinct(newFilters);
+            return this;
+        }
+
+        public ManualConfig AddLogicalGroupRules(params BenchmarkLogicalGroupRule[] rules)
+        {
+            logicalGroupRules.AddRangeDistinct(rules);
+            return this;
+        }
+
+        public ManualConfig AddEventProcessor(params EventProcessor[] newEventProcessors)
+        {
+            eventProcessors.AddRangeDistinct(newEventProcessors);
+            return this;
+        }
+
+        [PublicAPI]
+        public ManualConfig HideColumns(params string[] columnNames)
+        {
+            columnHidingRules.AddRangeDistinct(columnNames.Select(c => new ColumnHidingByNameRule(c)));
+            return this;
+        }
+
+        [PublicAPI]
+        public ManualConfig HideColumns(params IColumn[] columns)
+        {
+            columnHidingRules.AddRangeDistinct(columns.Select(c => new ColumnHidingByIdRule(c)));
+            return this;
+        }
+
+        [PublicAPI]
+        public ManualConfig HideColumns(params IColumnHidingRule[] rules)
+        {
+            columnHidingRules.AddRangeDistinct(rules);
+            return this;
+        }
+
+        [PublicAPI]
+        public void Add(IConfig config)
+        {
+            columnProviders.AddRangeDistinct(config.GetColumnProviders());
+            exporters.AddRangeDistinct(config.GetExporters());
+            loggers.AddRangeDistinct(config.GetLoggers());
+            diagnosers.AddRangeDistinct(config.GetDiagnosers());
+            analysers.AddRangeDistinct(config.GetAnalysers());
+            jobs.AddRangeDistinct(config.GetJobs());
+            validators.AddRangeDistinct(config.GetValidators());
+            hardwareCounters.AddRange(config.GetHardwareCounters());
+            filters.AddRangeDistinct(config.GetFilters());
+            eventProcessors.AddRangeDistinct(config.GetEventProcessors());
+            Orderer = config.Orderer ?? Orderer;
+            CategoryDiscoverer = config.CategoryDiscoverer ?? CategoryDiscoverer;
+            ArtifactsPath = config.ArtifactsPath ?? ArtifactsPath;
+            Title = config.Title ?? Title;
+            CultureInfo = config.CultureInfo ?? CultureInfo;
+            SummaryStyle = config.SummaryStyle ?? SummaryStyle;
+            logicalGroupRules.AddRangeDistinct(config.GetLogicalGroupRules());
+            columnHidingRules.AddRangeDistinct(config.GetColumnHidingRules());
+            Options |= config.Options;
+            BuildTimeout = GetBuildTimeout(BuildTimeout, config.BuildTimeout);
+            WakeLock = GetWakeLock(WakeLock, config.WakeLock);
+        }
+
+        /// <summary>
+        /// Creates a completely EMPTY config with no predefined settings.
+        /// </summary>
+        /// <remarks>You should most probably use the <see cref="CreateMinimumViable"></see> method instead.</remarks>
+        public static ManualConfig CreateEmpty() => new ManualConfig();
+
+        /// <summary>
+        /// Creates a minimum viable config with predefined columns provider and console logger.
+        /// </summary>
+        public static ManualConfig CreateMinimumViable()
+            => CreateEmpty()
+                .AddColumnProvider(DefaultColumnProviders.Instance)
+                .AddLogger(ConsoleLogger.Default);
+
+        public static ManualConfig Create(IConfig config)
+        {
+            var manualConfig = new ManualConfig();
+            manualConfig.Add(config);
+            return manualConfig;
+        }
+
+        public static ManualConfig Union(IConfig globalConfig, IConfig localConfig)
+        {
+            var manualConfig = new ManualConfig();
+            switch (localConfig.UnionRule)
+            {
+                case ConfigUnionRule.AlwaysUseLocal:
+                    manualConfig.Add(localConfig);
+                    manualConfig.AddFilter(globalConfig.GetFilters().ToArray()); // the filters should be merged anyway
+                    break;
+                case ConfigUnionRule.AlwaysUseGlobal:
+                    manualConfig.Add(globalConfig);
+                    manualConfig.AddFilter(localConfig.GetFilters().ToArray()); // the filters should be merged anyway
+                    break;
+                case ConfigUnionRule.Union:
+                    manualConfig.Add(globalConfig);
+                    manualConfig.Add(localConfig);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+            return manualConfig;
+        }
+
+        internal ManualConfig RemoveLoggersOfType<T>()
+        {
+            loggers.RemoveAll(logger => logger is T);
+            return this;
+        }
+
+        internal void RemoveAllJobs() => jobs.Clear();
+
+        internal void RemoveAllDiagnosers() => diagnosers.Clear();
+
+        private static TimeSpan GetBuildTimeout(TimeSpan current, TimeSpan other)
+            => current == DefaultConfig.Instance.BuildTimeout
+                ? other
+                : TimeSpan.FromMilliseconds(Math.Max(current.TotalMilliseconds, other.TotalMilliseconds));
+
+        private static WakeLockType GetWakeLock(WakeLockType current, WakeLockType other)
+        {
+            if (current == DefaultConfig.Instance.WakeLock) { return other; }
+            if (other == DefaultConfig.Instance.WakeLock) { return current; }
+            return current.CompareTo(other) > 0 ? current : other;
+        }
+    }
+}

@@ -1,0 +1,202 @@
+using BenchmarkDotNet.Columns;
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Environments;
+using BenchmarkDotNet.Helpers;
+using BenchmarkDotNet.Order;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Validators;
+using JetBrains.Annotations;
+using Perfolizer.Horology;
+using Perfolizer.Models;
+using Perfolizer.Perfonar.Tables;
+using System.Collections.Immutable;
+using System.Globalization;
+
+namespace BenchmarkDotNet.Reports
+{
+    public class Summary
+    {
+        [PublicAPI] public string Title { get; }
+        [PublicAPI] public string ResultsDirectoryPath { get; }
+        [PublicAPI] public string LogFilePath { get; }
+        [PublicAPI] public HostEnvironmentInfo HostEnvironmentInfo { get; }
+        [PublicAPI] public TimeSpan TotalTime { get; }
+        [PublicAPI] public SummaryStyle Style { get; }
+        [PublicAPI] public IOrderer Orderer { get; }
+        [PublicAPI] public SummaryTable Table { get; }
+        [PublicAPI] public string AllRuntimes { get; }
+        [PublicAPI] public ImmutableArray<ValidationError> ValidationErrors { get; }
+        [PublicAPI] public ImmutableArray<IColumnHidingRule> ColumnHidingRules { get; }
+
+        [PublicAPI] public ImmutableArray<BenchmarkCase> BenchmarksCases { get; }
+        [PublicAPI] public ImmutableArray<BenchmarkReport> Reports { get; }
+
+        internal DisplayPrecisionManager DisplayPrecisionManager { get; }
+
+        private ImmutableDictionary<BenchmarkCase, BenchmarkReport> ReportMap { get; }
+        private BaseliningStrategy BaseliningStrategy { get; }
+        private bool? isMultipleRuntimes;
+
+        public Summary(
+            string title,
+            ImmutableArray<BenchmarkReport> reports,
+            HostEnvironmentInfo hostEnvironmentInfo,
+            string resultsDirectoryPath,
+            string logFilePath,
+            TimeSpan totalTime,
+            CultureInfo cultureInfo,
+            ImmutableArray<ValidationError> validationErrors,
+            ImmutableArray<IColumnHidingRule> columnHidingRules,
+            SummaryStyle? summaryStyle = null)
+        {
+            Title = title;
+            ResultsDirectoryPath = resultsDirectoryPath;
+            LogFilePath = logFilePath;
+            HostEnvironmentInfo = hostEnvironmentInfo;
+            TotalTime = totalTime;
+            ValidationErrors = validationErrors;
+            ColumnHidingRules = columnHidingRules;
+
+            ReportMap = reports.ToImmutableDictionary(report => report.BenchmarkCase, report => report);
+
+            DisplayPrecisionManager = new DisplayPrecisionManager(this);
+            Orderer = GetConfiguredOrdererOrDefaultOne(reports.Select(report => report.BenchmarkCase.Config));
+            BenchmarksCases =
+                Orderer.GetSummaryOrder(reports.Select(report => report.BenchmarkCase).ToImmutableArray(), this).ToImmutableArray(); // we sort it first
+            Reports = BenchmarksCases.Select(b => ReportMap[b]).ToImmutableArray(); // we use sorted collection to re-create reports list
+            BaseliningStrategy = BaseliningStrategy.Create(BenchmarksCases);
+            Style = (summaryStyle ?? GetConfiguredSummaryStyleOrDefaultOne(BenchmarksCases)).WithCultureInfo(cultureInfo);
+            Table = GetTable(Style);
+            AllRuntimes = BuildAllRuntimes(HostEnvironmentInfo, Reports);
+        }
+
+        [PublicAPI] public bool HasReport(BenchmarkCase benchmarkCase) => ReportMap.ContainsKey(benchmarkCase);
+
+        /// <summary>
+        /// Returns a report for the given benchmark or null if there is no a corresponded report.
+        /// </summary>
+        public BenchmarkReport? this[BenchmarkCase benchmarkCase] => ReportMap.GetValueOrDefault(benchmarkCase);
+
+        public bool HasCriticalValidationErrors => ValidationErrors.Any(validationError => validationError.IsCritical);
+
+        public int GetNumberOfExecutedBenchmarks() => Reports.Count(report => report.ExecuteResults.Any(result => result.FoundExecutable));
+
+        public bool IsMultipleRuntimes
+            => isMultipleRuntimes ??= BenchmarksCases.Length > 1 ? BenchmarksCases.Select(benchmark => benchmark.GetRuntime()).Distinct().Count() > 1 : false;
+
+        internal static Summary ValidationFailed(string title, string resultsDirectoryPath, string logFilePath,
+            ImmutableArray<ValidationError>? validationErrors = null)
+            => new Summary(title, [], HostEnvironmentInfo.GetCurrent(), resultsDirectoryPath, logFilePath, TimeSpan.Zero,
+                DefaultCultureInfo.Instance, validationErrors ?? [], []);
+
+        internal static Summary Join(List<Summary> summaries, ClockSpan clockSpan, string? title = null)
+            => new Summary(
+                title ?? TitleHelper.GetJoinedSummaryTitle(customTitle: null),
+                summaries.SelectMany(summary => summary.Reports).ToImmutableArray(),
+                HostEnvironmentInfo.GetCurrent(),
+                summaries.First().ResultsDirectoryPath,
+                summaries.First().LogFilePath,
+                clockSpan.GetTimeSpan(),
+                summaries.First().GetCultureInfo(),
+                summaries.SelectMany(summary => summary.ValidationErrors).ToImmutableArray(),
+                summaries.SelectMany(summary => summary.ColumnHidingRules).ToImmutableArray());
+
+        internal static string BuildAllRuntimes(HostEnvironmentInfo hostEnvironmentInfo, IEnumerable<BenchmarkReport> reports)
+        {
+            var jobRuntimes = new Dictionary<string, string>(); // JobId -> Runtime
+            var orderedJobs = new List<string> { "[Host]" };
+
+            jobRuntimes["[Host]"] = hostEnvironmentInfo.GetRuntimeInfo();
+
+            foreach (var benchmarkReport in reports)
+            {
+                string? runtime = benchmarkReport.GetRuntimeInfo();
+                if (runtime != null)
+                {
+                    string jobId = benchmarkReport.BenchmarkCase.Job.ResolvedId;
+
+                    if (!jobRuntimes.ContainsKey(jobId))
+                    {
+                        orderedJobs.Add(jobId);
+                        jobRuntimes[jobId] = runtime;
+                    }
+                }
+            }
+
+            int jobIdMaxWidth = orderedJobs.Max(j => j.ToString().Length);
+
+            var lines = orderedJobs.Select(jobId => $"  {jobId.PadRight(jobIdMaxWidth)} : {jobRuntimes[jobId]}");
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        internal SummaryTable GetTable(SummaryStyle style) => new SummaryTable(this, style);
+
+        public string? GetLogicalGroupKey(BenchmarkCase benchmarkCase)
+            => Orderer.GetLogicalGroupKey(BenchmarksCases, benchmarkCase);
+
+        public bool IsBaseline(BenchmarkCase benchmarkCase)
+            => BaseliningStrategy.IsBaseline(benchmarkCase);
+
+        public BenchmarkCase? GetBaseline(string? logicalGroupKey)
+            => BenchmarksCases
+                .Where(b => GetLogicalGroupKey(b) == logicalGroupKey)
+                .FirstOrDefault(IsBaseline);
+
+        public IEnumerable<BenchmarkCase> GetNonBaselines(string? logicalGroupKey)
+            => BenchmarksCases
+                .Where(b => GetLogicalGroupKey(b) == logicalGroupKey)
+                .Where(b => !IsBaseline(b));
+
+        public bool HasBaselines() => BenchmarksCases.Any(IsBaseline);
+
+        private static IOrderer GetConfiguredOrdererOrDefaultOne(IEnumerable<ImmutableConfig> configs)
+            => configs
+                   .Where(config => config.Orderer != DefaultOrderer.Instance)
+                   .Select(config => config.Orderer)
+                   .Distinct()
+                   .FirstOrDefault()
+               ?? DefaultOrderer.Instance;
+
+        private static SummaryStyle GetConfiguredSummaryStyleOrDefaultOne(ImmutableArray<BenchmarkCase> benchmarkCases)
+            => benchmarkCases
+                   .Where(benchmark => benchmark.Config.SummaryStyle != SummaryStyle.Default)
+                   .Select(benchmark => benchmark.Config.SummaryStyle)
+                   .Distinct()
+                   .FirstOrDefault()
+               ?? SummaryStyle.Default;
+
+        internal PerfonarTableConfig GetDefaultTableConfig()
+        {
+            return new PerfonarTableConfig
+            {
+                ColumnDefinitions =
+                [
+                    new PerfonarColumnDefinition(".engine") { Cloud = "primary", IsSelfExplanatory = true, IsAtomic = true },
+                    new PerfonarColumnDefinition(".host.os") { Cloud = "primary", IsSelfExplanatory = true, IsAtomic = true },
+                    new PerfonarColumnDefinition(".host.cpu") { Cloud = "primary", IsSelfExplanatory = true, IsAtomic = true },
+                    new PerfonarColumnDefinition(".benchmark") { Cloud = "secondary" },
+                    new PerfonarColumnDefinition(".job") { Cloud = "secondary", Compressed = true },
+                    new PerfonarColumnDefinition("=center"),
+                    new PerfonarColumnDefinition("=spread")
+                ]
+            };
+        }
+
+        // TODO: GcStats
+        internal EntryInfo ToPerfonar()
+        {
+            var root = new EntryInfo
+            {
+                Engine = new EngineInfo
+                {
+                    Name = HostEnvironmentInfo.BenchmarkDotNetCaption,
+                    Version = HostEnvironmentInfo.BenchmarkDotNetVersion,
+                },
+                Host = HostEnvironmentInfo.ToPerfonar(),
+            };
+            foreach (var benchmarkReport in Reports)
+                root.Add(benchmarkReport.ToPerfonar());
+            return root;
+        }
+    }
+}

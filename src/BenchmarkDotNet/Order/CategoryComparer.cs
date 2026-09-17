@@ -1,0 +1,24 @@
+namespace BenchmarkDotNet.Order
+{
+    internal class CategoryComparer : IComparer<string[]>
+    {
+        private const string Separator = "§";
+        public static readonly CategoryComparer Instance = new();
+
+        public int Compare(string[]? x, string[]? y)
+        {
+            if (ReferenceEquals(x, y)) return 0;
+            if (x is null) return -1;
+            if (y is null) return 1;
+
+            return string.Compare(GetUniqueId(x), GetUniqueId(y), StringComparison.Ordinal);
+        }
+
+        private static string GetUniqueId(string[] categories)
+        {
+            var list = categories.ToList();
+            list.Sort();
+            return string.Join(Separator, categories);
+        }
+    }
+}

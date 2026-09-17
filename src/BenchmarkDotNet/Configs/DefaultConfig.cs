@@ -1,0 +1,139 @@
+using BenchmarkDotNet.Analysers;
+using BenchmarkDotNet.Columns;
+using BenchmarkDotNet.Detectors;
+using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.EventProcessors;
+using BenchmarkDotNet.Exporters;
+using BenchmarkDotNet.Exporters.Csv;
+using BenchmarkDotNet.Filters;
+using BenchmarkDotNet.Jobs;
+using BenchmarkDotNet.Loggers;
+using BenchmarkDotNet.Order;
+using BenchmarkDotNet.Reports;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Validators;
+using System.Globalization;
+
+namespace BenchmarkDotNet.Configs
+{
+    public class DefaultConfig : IConfig
+    {
+        public static IConfig Instance => customDefaultConfig ?? Default;
+
+        public static readonly IConfig Default = new DefaultConfig();
+
+        private readonly static Conclusion[] emptyConclusion = [];
+
+        private static IConfig? customDefaultConfig = null;
+
+        private DefaultConfig()
+        {
+        }
+
+        public static void SetCustomConfig(ImmutableConfig? config)
+        {
+            customDefaultConfig = config;
+        }
+
+        public IEnumerable<IColumnProvider> GetColumnProviders() => DefaultColumnProviders.Instance;
+
+        public IEnumerable<IExporter> GetExporters()
+        {
+            // Now that we can specify exporters on the cmd line (e.g. "exporters=html,stackoverflow"),
+            // we should have less enabled by default and then users can turn on the ones they want
+            yield return CsvExporter.Default;
+            yield return MarkdownExporter.GitHub;
+            yield return HtmlExporter.Default;
+        }
+
+        public IEnumerable<ILogger> GetLoggers()
+        {
+            if (LinqPadLogger.IsAvailable)
+                yield return LinqPadLogger.Instance!;
+            else
+                yield return ConsoleLogger.Default;
+        }
+
+        public IEnumerable<IAnalyser> GetAnalysers()
+        {
+            yield return EnvironmentAnalyser.Default;
+            yield return OutliersAnalyser.Default;
+            yield return MinIterationTimeAnalyser.Default;
+            yield return MultimodalDistributionAnalyzer.Default;
+            yield return RuntimeErrorAnalyser.Default;
+            yield return ZeroMeasurementAnalyser.Default;
+            yield return BaselineCustomAnalyzer.Default;
+            yield return HideColumnsAnalyser.Default;
+        }
+
+        public IEnumerable<IValidator> GetValidators()
+        {
+            yield return BaselineValidator.FailOnError;
+            yield return SetupCleanupValidator.FailOnError;
+            yield return AwaitableAsyncEnumerableAmbiguityValidator.DontFailOnError;
+#if !DEBUG
+            yield return JitOptimizationsValidator.FailOnError;
+#endif
+            yield return RunModeValidator.FailOnError;
+            yield return GenericBenchmarksValidator.DontFailOnError;
+            yield return DeferredExecutionValidator.FailOnError;
+            yield return ParamsAllValuesValidator.FailOnError;
+            yield return ParamsValidator.FailOnError;
+            yield return RequiredMemberValidator.FailOnError;
+            yield return SourceReturnTypeValidator.FailOnError;
+            yield return BenchmarkCancellationValidator.FailOnError;
+        }
+
+        public IOrderer? Orderer => null;
+        public ICategoryDiscoverer? CategoryDiscoverer => null;
+
+        public ConfigUnionRule UnionRule => ConfigUnionRule.Union;
+
+        public CultureInfo? CultureInfo => null;
+
+        public ConfigOptions Options => ConfigOptions.Default;
+
+        public SummaryStyle SummaryStyle => SummaryStyle.Default;
+
+        public TimeSpan BuildTimeout => TimeSpan.FromSeconds(120);
+
+        public WakeLockType WakeLock => WakeLockType.System;
+
+        public string ArtifactsPath
+        {
+            get
+            {
+                string root;
+                if (OsDetector.IsMobile())
+                {
+                    // On mobile platforms (Android, iOS, tvOS), use a writable location
+                    // because the app bundle and current directory are read-only due to sandboxing
+                    root = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                }
+                else
+                {
+                    root = Directory.GetCurrentDirectory();
+                }
+                return Path.Combine(root, "BenchmarkDotNet.Artifacts");
+            }
+        }
+
+        public string? Title => null;
+
+        public IReadOnlyList<Conclusion> ConfigAnalysisConclusion => emptyConclusion;
+
+        public IEnumerable<Job> GetJobs() => [];
+
+        public IEnumerable<BenchmarkLogicalGroupRule> GetLogicalGroupRules() => [];
+
+        public IEnumerable<IDiagnoser> GetDiagnosers() => [];
+
+        public IEnumerable<HardwareCounter> GetHardwareCounters() => [];
+
+        public IEnumerable<IFilter> GetFilters() => [];
+
+        public IEnumerable<EventProcessor> GetEventProcessors() => [];
+
+        public IEnumerable<IColumnHidingRule> GetColumnHidingRules() => [];
+    }
+}

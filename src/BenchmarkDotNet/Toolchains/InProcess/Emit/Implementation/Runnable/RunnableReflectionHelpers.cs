@@ -1,0 +1,120 @@
+﻿using BenchmarkDotNet.Extensions;
+using BenchmarkDotNet.Parameters;
+using BenchmarkDotNet.Running;
+using Perfolizer.Horology;
+using System.Reflection;
+using static BenchmarkDotNet.Code.RunnableConstants;
+
+namespace BenchmarkDotNet.Toolchains.InProcess.Emit.Implementation
+{
+    internal static class RunnableReflectionHelpers
+    {
+        public const BindingFlags BindingFlagsNonPublicInstance = BindingFlags.NonPublic | BindingFlags.Instance;
+        public const BindingFlags BindingFlagsPublicInstance = BindingFlags.Public | BindingFlags.Instance;
+        public const BindingFlags BindingFlagsPublicStatic = BindingFlags.Public | BindingFlags.Static;
+        public const BindingFlags BindingFlagsAllStatic = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
+        public const BindingFlags BindingFlagsAllInstance = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        private static object? TryChangeType(object? value, Type targetType)
+        {
+            try
+            {
+                return targetType.IsInstanceOfType(value)
+                    ? value
+                    : Convert.ChangeType(value, targetType);
+            }
+            catch (InvalidCastException)
+            {
+            }
+
+            if (value != null)
+            {
+                var implicitOp = GetImplicitConversionOpFromTo(value.GetType(), targetType);
+                if (implicitOp != null)
+                    return implicitOp.Invoke(null, [value])!;
+            }
+
+            return value;
+        }
+
+        public static MethodInfo? GetImplicitConversionOpFromTo(Type from, Type to)
+        {
+            return GetImplicitConversionOpCore(to, from, to)
+                ?? GetImplicitConversionOpCore(from, from, to);
+        }
+
+        private static MethodInfo? GetImplicitConversionOpCore(Type owner, Type from, Type to)
+        {
+            return owner.GetMethods(BindingFlagsPublicStatic)
+                .FirstOrDefault(m =>
+                    m.Name == ReflectionExtensions.OpImplicitMethodName
+                    && m.ReturnType == to
+                    && m.GetParameters().Single().ParameterType == from);
+        }
+
+        public static void SetArgumentField(object instance, BenchmarkCase benchmarkCase, ParameterInfo argInfo, int argIndex)
+        {
+            var argValue = benchmarkCase.Parameters.GetArgument(argInfo.Name!)
+                ?? throw new InvalidOperationException($"Can't find arg member for {argInfo.Name}.");
+
+            // DeclaredOnly: the benchmark the runnable derives from may declare a field of this name too.
+            var containerField = instance.GetType().GetField(FieldsContainerName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly)
+                ?? throw new InvalidOperationException("FieldsContainer field not found on runnable instance.");
+
+            var container = containerField.GetValue(instance)!;
+
+            var argName = ArgFieldPrefix + argIndex;
+
+            var argField = container.GetType().GetField(argName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                ?? throw new InvalidOperationException($"Can't find arg member {argName} inside FieldsContainer.");
+
+            argField.SetValue(container, TryChangeType(argValue.Value, argField.FieldType));
+            containerField.SetValue(instance, container);
+        }
+
+        public static void SetParameter(object instance, ParameterInstance paramInfo)
+        {
+            var instanceArg = paramInfo.IsStatic ? null : instance;
+            var bindingFlags = paramInfo.IsStatic ? BindingFlagsAllStatic : BindingFlagsAllInstance;
+            var type = instance.GetType();
+
+            switch (type.GetParameterMember(paramInfo.Name, paramInfo.Definition.ParameterType, bindingFlags))
+            {
+                case PropertyInfo p:
+                    p.SetValue(instanceArg, TryChangeType(paramInfo.Value, p.PropertyType));
+                    break;
+
+                case FieldInfo f:
+                    f.SetValue(instanceArg, TryChangeType(paramInfo.Value, f.FieldType));
+                    break;
+
+                default:
+                    throw new InvalidOperationException($"Can't find a member {paramInfo.ToDisplayText()}.");
+            }
+        }
+
+        public static Func<ValueTask> SetupOrCleanupCallbackFromMethod(object instance, string memberName)
+        {
+            return GetDelegateCore<Func<ValueTask>>(instance, memberName);
+        }
+
+        public static Func<long, IClock, ValueTask<ClockSpan>> LoopCallbackFromMethod(object instance, string memberName)
+        {
+            return GetDelegateCore<Func<long, IClock, ValueTask<ClockSpan>>>(instance, memberName);
+        }
+
+        private static TDelegate GetDelegateCore<TDelegate>(object instance, string memberName)
+        {
+            // DeclaredOnly: memberName always names a method the runnable declares, and the benchmark it derives from
+            // may well declare its own of that name - GlobalSetup and IterationSetup are what an attributed method is
+            // usually called - which an overload of would otherwise make an ambiguous match.
+            var result = instance.GetType().GetMethod(
+                memberName,
+                BindingFlagsAllInstance | BindingFlags.DeclaredOnly);
+            if (result == null)
+                throw new InvalidOperationException($"Can't find a member {memberName}.");
+
+            return (TDelegate)(object)Delegate.CreateDelegate(typeof(TDelegate), instance, result);
+        }
+    }
+}

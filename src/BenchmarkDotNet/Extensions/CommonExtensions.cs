@@ -1,0 +1,127 @@
+using BenchmarkDotNet.Columns;
+using BenchmarkDotNet.Helpers;
+using BenchmarkDotNet.Reports;
+using System.Diagnostics.CodeAnalysis;
+
+namespace BenchmarkDotNet.Extensions
+{
+    internal static class CommonExtensions
+    {
+        /// <summary>
+        /// Gets column title formatted using the specified style
+        /// </summary>
+        public static string GetColumnTitle(this IColumn column, SummaryStyle style)
+        {
+            if (!style.PrintUnitsInHeader)
+                return column.ColumnName;
+
+            switch (column.UnitType)
+            {
+                case UnitType.CodeSize:
+                    return $"{column.ColumnName} [{style.CodeSizeUnit.GetAbbreviation()}]";
+                case UnitType.Size:
+                    return style.SizeUnit != null
+                        ? $"{column.ColumnName} [{style.SizeUnit.GetAbbreviation()}]"
+                        : $"{column.ColumnName}";
+                case UnitType.Time:
+                    return style.TimeUnit != null
+                        ? $"{column.ColumnName} [{style.TimeUnit.GetAbbreviation()}]"
+                        : $"{column.ColumnName}";
+                case UnitType.Dimensionless:
+                    return column.ColumnName;
+                default:
+                    return column.ColumnName;
+            }
+        }
+
+        public static bool IsNullOrEmpty<T>([NotNullWhen(false)] this IReadOnlyCollection<T>? value) => value == null || value.Count == 0;
+        public static bool IsEmpty<T>(this IReadOnlyCollection<T> value) => value.Count == 0;
+        public static bool IsEmpty<T>(this IEnumerable<T> value) => !value.Any();
+
+        public static IEnumerable<T> WhereNotNull<T>(this IEnumerable<T?> values) => values.Where(value => value != null).Cast<T>();
+
+        public static void AddRange<T>(this HashSet<T> hashSet, IEnumerable<T> collection)
+        {
+            foreach (var item in collection)
+                hashSet.Add(item);
+        }
+
+        public static void AddRangeDistinct<T>(this List<T> list, IEnumerable<T> items, IEqualityComparer<T>? comparer = null)
+        {
+            var hashSet = new HashSet<T>(list, comparer);
+            foreach (var item in items)
+            {
+                if (hashSet.Add(item))
+                    list.Add(item);
+            }
+        }
+
+#if NETSTANDARD2_0
+        public static TValue? GetValueOrDefault<TKey, TValue>(this IDictionary<TKey, TValue> dictionary, TKey key)
+            => dictionary.TryGetValue(key, out var value) ? value : default;
+#endif
+
+        public static double Sqr(this double x) => x * x;
+        public static double Pow(this double x, double k) => Math.Pow(x, k);
+
+#if NETSTANDARD
+        internal static IEnumerable<TItem> DistinctBy<TItem, TValue>(this IEnumerable<TItem> items, Func<TItem, TValue> selector)
+            => DistinctBy(items, selector, EqualityComparer<TValue>.Default);
+
+        private static IEnumerable<TItem> DistinctBy<TItem, TValue>(this IEnumerable<TItem> items, Func<TItem, TValue> selector,
+            IEqualityComparer<TValue> equalityComparer)
+        {
+            var seen = new HashSet<TValue>(equalityComparer);
+
+            foreach (var item in items)
+                if (seen.Add(selector(item)))
+                    yield return item;
+        }
+#endif
+
+        internal static void ForEach<T>(this IList<T> source, Action<T> command)
+        {
+            foreach (var item in source)
+                command(item);
+        }
+
+        internal static string CreateIfNotExists(this string directoryPath)
+        {
+            if (!Directory.Exists(directoryPath))
+                Directory.CreateDirectory(directoryPath);
+
+            return directoryPath;
+        }
+
+        internal static DirectoryInfo CreateIfNotExists(this DirectoryInfo directory)
+        {
+            if (!directory.Exists)
+                directory.Create();
+
+            return directory;
+        }
+
+        internal static string DeleteFileIfExists(this string filePath)
+        {
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+
+            return filePath;
+        }
+
+        internal static string EnsureFolderExists(this string filePath)
+        {
+            string? directoryPath = Path.GetDirectoryName(filePath);
+            if (directoryPath == null)
+                throw new ArgumentException($"Can't get directory path from '{filePath}'");
+
+            if (!Directory.Exists(directoryPath))
+                Directory.CreateDirectory(directoryPath);
+
+            return filePath;
+        }
+
+        internal static bool IsNotNullButDoesNotExist(this FileSystemInfo? fileInfo)
+            => fileInfo != null && !fileInfo.Exists;
+    }
+}

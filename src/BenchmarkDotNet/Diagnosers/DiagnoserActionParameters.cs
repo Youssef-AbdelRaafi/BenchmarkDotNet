@@ -1,0 +1,26 @@
+using BenchmarkDotNet.Configs;
+using BenchmarkDotNet.Running;
+using System.Diagnostics;
+
+namespace BenchmarkDotNet.Diagnosers
+{
+    public class DiagnoserActionParameters
+    {
+        public DiagnoserActionParameters(Process? process, BenchmarkCase benchmarkCase, BenchmarkId benchmarkId)
+        {
+            Process = process;
+            BenchmarkCase = benchmarkCase;
+            BenchmarkId = benchmarkId;
+        }
+
+        public Process? Process { get; }
+
+        public int ProcessId => Process?.Id ?? throw new InvalidOperationException("The process instance is not set.");
+
+        public BenchmarkCase BenchmarkCase { get; }
+
+        public BenchmarkId BenchmarkId { get; }
+
+        public ImmutableConfig Config => BenchmarkCase.Config;
+    }
+}

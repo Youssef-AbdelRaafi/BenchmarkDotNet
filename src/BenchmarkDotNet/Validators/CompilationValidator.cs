@@ -1,0 +1,130 @@
+using BenchmarkDotNet.Extensions;
+using BenchmarkDotNet.Running;
+using BenchmarkDotNet.Toolchains;
+using Microsoft.CodeAnalysis.CSharp;
+using System.Collections.Immutable;
+using System.Reflection;
+
+namespace BenchmarkDotNet.Validators
+{
+    public class CompilationValidator : IValidator
+    {
+        private const char Underscore = '_';
+
+        public static readonly IValidator FailOnError = new CompilationValidator();
+
+        private static readonly ImmutableHashSet<string> CsharpKeywords = GetCsharpKeywords().ToImmutableHashSet();
+
+        private CompilationValidator() { }
+
+        public bool TreatsWarningsAsErrors => true;
+
+        public IAsyncEnumerable<ValidationError> ValidateAsync(ValidationParameters validationParameters)
+            => ValidateCSharpNaming(validationParameters.Benchmarks)
+                .Concat(ValidateClassModifiers(validationParameters.Benchmarks))
+                .Concat(ValidateAccessModifiers(validationParameters.Benchmarks))
+                .Concat(ValidateBindingModifiers(validationParameters.Benchmarks))
+                .Concat(ValidateMethodImpl(validationParameters.Benchmarks))
+                .ToAsyncEnumerable();
+
+        private static IEnumerable<ValidationError> ValidateClassModifiers(IEnumerable<BenchmarkCase> benchmarks)
+        {
+            return benchmarks
+                .Distinct(BenchmarkMethodEqualityComparer.Instance)
+                .SelectMany(benchmark =>
+                {
+                    var type = benchmark.Descriptor.Type;
+                    var errors = new List<ValidationError>();
+
+                    if (type.IsSealed)
+                    {
+                        errors.Add(new ValidationError(
+                           true,
+                           $"Benchmarked method `{benchmark.Descriptor.WorkloadMethod.Name}` is within a sealed class, Declaring type must be unsealed.",
+                           benchmark));
+                    }
+                    if (!type.IsVisible)
+                    {
+                        errors.Add(new ValidationError(
+                            true,
+                            $"Benchmarked method `{benchmark.Descriptor.WorkloadMethod.Name}` is within a non-visible class, all declaring types must be public.",
+                            benchmark));
+                    }
+                    // TODO: Generics validation
+                    return errors;
+                });
+        }
+
+        private static IEnumerable<ValidationError> ValidateCSharpNaming(IEnumerable<BenchmarkCase> benchmarks)
+            => benchmarks
+                .Where(benchmark => !IsValidCSharpIdentifier(benchmark.Descriptor.WorkloadMethod.Name))
+                .Distinct(BenchmarkMethodEqualityComparer.Instance) // we might have multiple jobs targeting same method. Single error should be enough ;)
+                .Select(benchmark
+                    => new ValidationError(
+                        true,
+                        $"Benchmarked method `{benchmark.Descriptor.WorkloadMethod.Name}` contains illegal character(s) or uses C# keyword. Please use `[<Benchmark(Description = \"Custom name\")>]` to set custom display name.",
+                        benchmark
+                    ));
+
+        private static IEnumerable<ValidationError> ValidateAccessModifiers(IEnumerable<BenchmarkCase> benchmarks)
+            => benchmarks.Where(x => x.Descriptor.Type.IsGenericType
+                                     && HasPrivateGenericArguments(x.Descriptor.Type))
+                         .Select(benchmark => new ValidationError(true, $"Generic class {benchmark.Descriptor.Type.GetDisplayName()} has non public generic argument(s)"));
+
+        private static IEnumerable<ValidationError> ValidateBindingModifiers(IEnumerable<BenchmarkCase> benchmarks)
+            => benchmarks.Where(x => x.Descriptor.WorkloadMethod.IsStatic && !x.GetToolchain().IsInProcess)
+                          .Distinct(BenchmarkMethodEqualityComparer.Instance)
+                          .Select(benchmark
+                              => new ValidationError(
+                                  true,
+                                  $"Benchmarked method `{benchmark.Descriptor.WorkloadMethod.Name}` is static. Benchmarks MUST be instance methods, static methods are not supported.",
+                                  benchmark
+                              ));
+
+        private static IEnumerable<ValidationError> ValidateMethodImpl(IEnumerable<BenchmarkCase> benchmarks)
+            => benchmarks.Where(x => !x.Descriptor.WorkloadMethod.MethodImplementationFlags.HasFlag(MethodImplAttributes.NoInlining))
+                .Distinct(BenchmarkMethodEqualityComparer.Instance)
+                .Select(benchmark
+                    => new ValidationError(
+                        true,
+                        $"Benchmarked method `{benchmark.Descriptor.WorkloadMethod.Name}` does not have MethodImplOptions.NoInlining flag set." +
+                        $" You may need to rebuild your project, or apply it manually if you are not using MSBuild to build your project.",
+                        benchmark
+                    ));
+
+        private static bool IsValidCSharpIdentifier(string identifier) // F# allows to use whitespaces as names #479
+            => !string.IsNullOrEmpty(identifier)
+               && (char.IsLetter(identifier[0]) || identifier[0] == Underscore) // An identifier must start with a letter or an underscore
+               && identifier.Skip(1).All(character => char.IsLetterOrDigit(character) || character == Underscore)
+               && !CsharpKeywords.Contains(identifier);
+
+        private static bool HasPrivateGenericArguments(Type type) => type.GetGenericArguments().Any(a => !(a.IsPublic || a.IsNestedPublic));
+
+        // source: https://stackoverflow.com/a/19562316
+        private static IEnumerable<string> GetCsharpKeywords()
+        {
+            var memberInfos = typeof(SyntaxKind).GetMembers(BindingFlags.Public | BindingFlags.Static);
+
+            return from memberInfo in memberInfos
+                   where memberInfo.Name.EndsWith("Keyword")
+                   orderby memberInfo.Name
+                   select memberInfo.Name.Substring(startIndex: 0, length: memberInfo.Name.IndexOf("Keyword", StringComparison.Ordinal)).ToLower();
+        }
+
+        private class BenchmarkMethodEqualityComparer : IEqualityComparer<BenchmarkCase>
+        {
+            internal static readonly IEqualityComparer<BenchmarkCase> Instance = new BenchmarkMethodEqualityComparer();
+
+            public bool Equals(BenchmarkCase? x, BenchmarkCase? y)
+            {
+                if (x == null && y == null) return true;
+                if (x == null || y == null) return false;
+                if (x.Descriptor.WorkloadMethod.Equals(y.Descriptor.WorkloadMethod))
+                    return true;
+                return false;
+            }
+
+            public int GetHashCode(BenchmarkCase obj) => obj.Descriptor.WorkloadMethod.GetHashCode();
+        }
+    }
+}
